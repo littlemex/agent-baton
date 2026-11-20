@@ -276,6 +276,7 @@ def confirm_deleted(env: DemoEnvironment) -> list[str]:
     iamc = session.client("iam")
     ddbc = session.client("dynamodb")
     ssm = session.client("ssm")
+    account = session.client("sts").get_caller_identity()["Account"]
     leftover = []
 
     try:
@@ -283,6 +284,14 @@ def confirm_deleted(env: DemoEnvironment) -> list[str]:
         leftover.append(f"table:{env.table_name}")
     except ClientError as e:
         if e.response["Error"]["Code"] != "ResourceNotFoundException":
+            raise
+
+    boundary_arn = f"arn:aws:iam::{account}:policy/{env.boundary_policy_name}"
+    try:
+        iamc.get_policy(PolicyArn=boundary_arn)
+        leftover.append(f"policy:{env.boundary_policy_name}")
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "NoSuchEntity":
             raise
 
     for role in (env.ai_base_role, *env.work_roles, env.broker_role):

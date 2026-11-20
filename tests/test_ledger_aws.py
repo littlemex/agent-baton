@@ -16,12 +16,13 @@ from __future__ import annotations
 import inspect
 import threading
 import time
+from unittest import mock
 
 import pytest
 from botocore.exceptions import ClientError
 from conftest import LIGHT_BINDING, assume_session, new_task_id
 
-from agent_baton.crypto import new_client_token
+from agent_baton.crypto import hash_token, new_client_token
 from agent_baton.ledger import Broker, Rejected, Wait
 
 pytestmark = pytest.mark.aws
@@ -120,9 +121,11 @@ def test_approval_gate(broker: Broker):
         broker.claim(task_id, new_client_token())  # claim() itself rejects before any human_go exists
 
     current_plan_ref = item["plan_ref"]
-    with pytest.raises(ClientError) as exc_info:
+    # grant_go() catches the ConditionalCheckFailedException this stale hash
+    # causes and raises Rejected - never a raw botocore error (CONTRACT.md
+    # s.8 item 9).
+    with pytest.raises(Rejected):
         broker.grant_go(task_id, "WRONG-STALE-HASH", expires_in_seconds=3600, granted_by="littlemex")
-    assert exc_info.value.response["Error"]["Code"] == "ConditionalCheckFailedException"
 
     broker.grant_go(task_id, current_plan_ref, expires_in_seconds=3600, granted_by="littlemex")
     tok_ok = new_client_token()
@@ -235,3 +238,63 @@ def test_abandon_sets_ttl(broker: Broker):
     assert item["state"] == "abandoned"
     assert "ttl" in item and item["ttl"] > 0
     assert item["abandon_reason"] == "manual test abandon"
+
+
+# ---------------------------------------- the central guarantee, injected ---
+# The RFC's own Acceptance Criteria name this exact scenario as unverified by
+# the prototype: "a heartbeat that lands between a challenger's own staleness
+# check and that challenger's own claiming write makes that write fail,
+# evidenced by a heartbeat injected at exactly that gap, not only by the
+# absence of a code path that happens not to try." An earlier version of
+# claim() in this repository re-read the item after confirming staleness and
+# conditioned its final write on THAT fresh version instead of the
+# confirmed-stale one - silently defeating this guarantee (caught by review,
+# not by any test; see CONTRACT.md s.8 item 7). This test is the missing
+# evidence, added once that bug was fixed.
+
+
+def test_heartbeat_injected_at_the_staleness_gap_blocks_the_takeover(broker: Broker, policy_table):
+    task_id = new_task_id("gap")
+    broker.create(task_id, "demo-light", "demo-light-profile", LIGHT_BINDING)
+    lease_seconds = policy_table["demo-light"].lease_seconds
+
+    tok_a = new_client_token()
+    status, _ = broker.claim(task_id, tok_a)
+    assert status == "claimed"
+
+    tok_b = new_client_token()
+    with pytest.raises(Wait):
+        broker.claim(task_id, tok_b)  # arms the staleness marker
+
+    time.sleep(lease_seconds + 0.5)  # A does nothing - this is the "crash" half
+
+    real_update_item = broker.t.update_item
+    injected = {"done": False}
+
+    def wrapped_update_item(**kwargs):
+        # Intercept only B's own claiming write (step 10's distinctive
+        # UpdateExpression), and only once - not the heartbeat call we are
+        # about to make from inside this same wrapper, nor any other write.
+        if not injected["done"] and "lease_holder_hash = :h" in kwargs.get("UpdateExpression", ""):
+            injected["done"] = True
+            # A renews its OWN lease here, via a real, separate boto3 call -
+            # exactly "a heartbeat injected at exactly that gap", landing
+            # between _arm_or_wait's confirmed-stale check (already passed,
+            # or B would not have reached this write at all) and B's own
+            # claiming write (about to happen, below).
+            assert broker.heartbeat(task_id, tok_a) is True
+        return real_update_item(**kwargs)
+
+    with mock.patch.object(broker.t, "update_item", side_effect=wrapped_update_item):
+        with pytest.raises(Wait):
+            # B's write loses the CAS against A's just-landed heartbeat,
+            # ledger.py catches that ConditionalCheckFailedException and
+            # re-runs claim() from a fresh read - which now sees A's renewed
+            # lease and must wait out a fresh lease_seconds, not succeed.
+            broker.claim(task_id, tok_b)
+
+    assert injected["done"] is True  # the injection actually happened - not a vacuous pass
+    item = broker.get(task_id)
+    assert item["state"] == "claimed"
+    assert item["lease_holder_hash"] == hash_token(tok_a)  # A, never B
+    assert broker.heartbeat(task_id, tok_a) is True  # A's lease is alive and well

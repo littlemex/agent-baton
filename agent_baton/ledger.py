@@ -12,6 +12,7 @@ assumes into.
 from __future__ import annotations
 
 import time
+from decimal import Decimal
 from typing import Any
 
 from botocore.exceptions import ClientError
@@ -51,31 +52,37 @@ class Broker:
 
     ``table`` is a boto3 DynamoDB ``Table`` resource built from the
     broker's *own* credentials - never an AI-facing session's. ``session``
-    (also the broker's own credentials) is used for the one other AWS call
-    a broker action makes on a caller's behalf: minting work credentials
-    via ``sts:AssumeRole`` in :meth:`vend_work_credentials`. Passing no
-    session falls back to the ambient ``boto3`` module-level credentials,
-    which is only ever correct for a single-identity test/demo process -
-    never for a real broker deployment, where ``session`` must be
-    constructed from the broker's own, narrowly-scoped identity.
+    (also the broker's own credentials) is **required**, not optional: it is
+    used for the one other AWS call a broker action makes on a caller's
+    behalf - minting work credentials via ``sts:AssumeRole`` in
+    :meth:`vend_work_credentials`. An earlier draft of this class let
+    ``session`` default to ``None`` and silently fell back to the ambient
+    ``boto3`` module-level credentials, which is exactly the bug CONTRACT.md
+    s.8 item 4 already named as fixed once (in ``vend_work_credentials``
+    itself) and reintroduced one layer up, in the constructor - caught by
+    review, not by any test. There is no safe default here: a caller that
+    forgets to pass its own narrow identity must fail loudly, not run with
+    whatever ambient credentials happen to be present.
     """
 
-    def __init__(self, table: Any, policy_table: PolicyTable, session: Any = None):
+    def __init__(self, table: Any, policy_table: PolicyTable, session: Any):
         self.t = table
         self.policy_table = policy_table
         self.session = session
 
     def _sts(self):
-        if self.session is not None:
-            return self.session.client("sts")
-        import boto3
-
-        return boto3.client("sts")
+        return self.session.client("sts")
 
     # ------------------------------------------------------------- reads ---
 
     def get(self, task_id: str) -> dict | None:
-        return self.t.get_item(Key={"task_id": task_id}).get("Item")
+        # ConsistentRead: every caller of get() uses its result to decide an
+        # ownership- or security-relevant question (claim()'s initial read,
+        # heartbeat/park/release/_terminal's holder check,
+        # vend_work_credentials()'s "is this still the current holder").
+        # An eventually consistent read could show a just-released or
+        # just-abandoned task as still claimed for a brief window.
+        return self.t.get_item(Key={"task_id": task_id}, ConsistentRead=True).get("Item")
 
     def list_tasks(self) -> list[dict]:
         """CONTRACT.md s.3: read actions are reachable identically from
@@ -104,6 +111,12 @@ class Broker:
     # ----------------------------------------------------------- create() --
 
     def create(self, task_id: str, kind: str, requested_profile: str, resource_binding: dict) -> dict:
+        if task_id.startswith("plan:"):
+            # "plan:" is the reserved prefix plan items use in this same
+            # partition-key space (Decision 2's single-table overload). A
+            # task_id in that namespace would be invisible to list_tasks()'s
+            # own filter and could collide with a real plan item's key.
+            raise Rejected("task_id may not start with the reserved prefix 'plan:'")
         policy = self._policy(kind)
         if policy is None or requested_profile not in policy.allowed_profiles:
             raise Rejected("unknown kind or profile not allowed for this kind")
@@ -122,7 +135,12 @@ class Broker:
             "resource_binding": resource_binding,
             "lease_seconds": policy.lease_seconds,
             "timebox_minutes": policy.timebox_minutes,
-            "max_cost_usd": policy.max_cost_usd,
+            # boto3's DynamoDB resource API refuses a native Python float
+            # outright - any policy with a non-integer max_cost_usd (the
+            # field's own declared type, e.g. 60.5) would otherwise make
+            # create() raise TypeError. str() first, same as crypto.broker_now(),
+            # to avoid binary-float imprecision leaking into the Decimal.
+            "max_cost_usd": Decimal(str(policy.max_cost_usd)),
             "max_retries": policy.max_retries,
             "work_role": policy.work_role,
             "deny_statements": list(policy.deny_statements),
@@ -197,13 +215,23 @@ class Broker:
         token_hash = hash_token(client_token)
         owned = item["state"] == "claimed" and item.get("lease_holder_hash") == token_hash
 
-        # step 5/6 - the two-call wait
+        # step 5/6 - the two-call wait. _arm_or_wait raises Wait() until it can
+        # confirm, by its own fresh read, that `item`'s own version has been
+        # unchanged for at least lease_seconds; it returns normally only once
+        # that is true. `item` (read once, at the very top of this call) is
+        # therefore ALREADY the confirmed-stale snapshot - CONTRACT.md s.4
+        # step 10 requires every subsequent write to condition on this exact
+        # version, not a fresh re-read's. A fresh re-read here was an earlier,
+        # real bug (caught by review, not by any test): it let a write that
+        # lands in the gap between the staleness check and this call's own
+        # claiming write go undetected, because the re-read would pick up
+        # that very write's new version and condition on IT instead of on
+        # the version that was actually confirmed stale - defeating the
+        # central guarantee this two-call protocol exists to provide. `owned`
+        # is already correctly False here (that is why this branch was
+        # entered at all), so nothing needs recomputing.
         if not owned and item["state"] in LIVE_STATES:
             self._arm_or_wait(task_id, item, policy)
-            item = self.get(task_id)  # version may have moved; recompute fresh
-            if item is None:
-                raise Rejected("no such task")  # deleted/expired between the two reads
-            owned = item["state"] == "claimed" and item.get("lease_holder_hash") == token_hash
 
         # step 7 - does this attempt charge the retry budget?
         charge = (not owned) and item["state"] in ("claimed", "failed")
@@ -216,13 +244,27 @@ class Broker:
                 or hg.get("plan_hash") != item["plan_ref"]
                 or broker_now() > hg.get("expires_at", 0)
             ):
-                self.t.update_item(
-                    Key={"task_id": task_id},
-                    UpdateExpression="SET #s = :aa, version = version + :one",
-                    ConditionExpression="version = :v0",
-                    ExpressionAttributeNames={"#s": "state"},
-                    ExpressionAttributeValues={":aa": "awaiting_approval", ":one": 1, ":v0": item["version"]},
-                )
+                try:
+                    self.t.update_item(
+                        Key={"task_id": task_id},
+                        UpdateExpression="SET #s = :aa, version = version + :one",
+                        ConditionExpression="version = :v0",
+                        ExpressionAttributeNames={"#s": "state"},
+                        ExpressionAttributeValues={
+                            ":aa": "awaiting_approval",
+                            ":one": 1,
+                            ":v0": item["version"],
+                        },
+                    )
+                except ClientError as e:
+                    if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                        raise
+                    # the holder renewed (or someone else wrote) in the gap
+                    # between the confirmed-stale read and this write - the
+                    # task is no longer in the state this decision was made
+                    # against; re-run claim() from a fresh read instead of
+                    # surfacing a raw ClientError to the caller.
+                    return self.claim(task_id, client_token)
                 raise Rejected("awaiting human Go")
 
         if charge and item["attempt_count"] >= policy.max_retries:
@@ -232,25 +274,36 @@ class Broker:
         if owned:
             return ("already_owned", item)
 
-        # step 10 - the actual compare-and-swap
-        self.t.update_item(
-            Key={"task_id": task_id},
-            UpdateExpression=(
-                "SET lease_holder_hash = :h, #s = :claimed, "
-                "claimed_at = if_not_exists(claimed_at, :now), "
-                "attempt_count = attempt_count + :charge, version = version + :one"
-            ),
-            ConditionExpression="version = :v0",
-            ExpressionAttributeNames={"#s": "state"},
-            ExpressionAttributeValues={
-                ":h": token_hash,
-                ":claimed": "claimed",
-                ":now": broker_now(),
-                ":charge": 1 if charge else 0,
-                ":one": 1,
-                ":v0": item["version"],
-            },
-        )
+        # step 10 - the actual compare-and-swap, conditioned on the version
+        # confirmed stale (or owned) in step 5/6 - never a fresher one.
+        try:
+            self.t.update_item(
+                Key={"task_id": task_id},
+                UpdateExpression=(
+                    "SET lease_holder_hash = :h, #s = :claimed, "
+                    "claimed_at = if_not_exists(claimed_at, :now), "
+                    "attempt_count = attempt_count + :charge, version = version + :one"
+                ),
+                ConditionExpression="version = :v0",
+                ExpressionAttributeNames={"#s": "state"},
+                ExpressionAttributeValues={
+                    ":h": token_hash,
+                    ":claimed": "claimed",
+                    ":now": broker_now(),
+                    ":charge": 1 if charge else 0,
+                    ":one": 1,
+                    ":v0": item["version"],
+                },
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+            # this is the central guarantee the two-call wait exists to
+            # provide: a holder that renewed (or anyone else who wrote) in
+            # the gap between the staleness check and this write makes this
+            # write fail. Re-run claim() fresh rather than report a false
+            # success or leak a raw botocore error.
+            return self.claim(task_id, client_token)
         return ("claimed", self.get(task_id))
 
     def _arm_or_wait(self, task_id: str, item: dict, policy: KindPolicy) -> None:
@@ -355,13 +408,18 @@ class Broker:
             expr += ", evidence = list_append(if_not_exists(evidence, :empty), :ev)"
             vals[":empty"] = []
             vals[":ev"] = [evidence_entry]
-        self.t.update_item(
-            Key={"task_id": task_id},
-            UpdateExpression=expr,
-            ConditionExpression="lease_holder_hash = :h AND #s = :claimed",
-            ExpressionAttributeNames={"#s": "state"},
-            ExpressionAttributeValues=vals,
-        )
+        try:
+            self.t.update_item(
+                Key={"task_id": task_id},
+                UpdateExpression=expr,
+                ConditionExpression="lease_holder_hash = :h AND #s = :claimed",
+                ExpressionAttributeNames={"#s": "state"},
+                ExpressionAttributeValues=vals,
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+            raise Rejected("lease lost before park() could commit") from e
 
     def resume(self, task_id: str, client_token: str):
         """Exactly ``claim()`` - no special case for the original parker
@@ -631,6 +689,22 @@ class Broker:
         plan = self._plan(item["plan_ref"])
         if plan is None:
             raise Rejected("no such task")
+        try:
+            self._grant_go_write(task_id, plan_hash, granted_by, expires_in_seconds, plan)
+        except ClientError as e:
+            if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+            # the plan_hash this grant names does not match the task's
+            # CURRENT plan_ref, or the task is no longer awaiting_approval -
+            # either way, a clean Rejected, never a raw botocore error.
+            raise Rejected(
+                "grant_go rejected: plan_hash does not match the current plan, "
+                "or the task is no longer awaiting_approval"
+            ) from e
+
+    def _grant_go_write(
+        self, task_id: str, plan_hash: str, granted_by: str, expires_in_seconds: int, plan: dict
+    ) -> None:
         self.t.update_item(
             Key={"task_id": task_id},
             UpdateExpression=(
