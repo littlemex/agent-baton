@@ -10,6 +10,7 @@ DynamoDB table. Everything the ``demo_env``/``policy_table`` fixtures
 create is torn down, and teardown is confirmed by direct describe/get
 calls, in ``conftest.py``.
 """
+
 from __future__ import annotations
 
 import inspect
@@ -18,16 +19,16 @@ import time
 
 import pytest
 from botocore.exceptions import ClientError
+from conftest import LIGHT_BINDING, assume_session, new_task_id
 
 from agent_baton.crypto import new_client_token
 from agent_baton.ledger import Broker, Rejected, Wait
-
-from conftest import LIGHT_BINDING, assume_session, new_task_id
 
 pytestmark = pytest.mark.aws
 
 
 # --------------------------------------------------------------------- race ---
+
 
 def test_race_exactly_one_of_eight_concurrent_claimants_wins(broker: Broker):
     task_id = new_task_id("race")
@@ -64,6 +65,7 @@ def test_race_exactly_one_of_eight_concurrent_claimants_wins(broker: Broker):
 
 
 # ----------------------------------------------------- lease and takeover ---
+
 
 def test_lease_and_takeover(broker: Broker, policy_table):
     task_id = new_task_id("crash")
@@ -107,6 +109,7 @@ def test_lease_and_takeover(broker: Broker, policy_table):
 
 
 # ------------------------------------------------------------- approval gate ---
+
 
 def test_approval_gate(broker: Broker):
     task_id = new_task_id("approve")
@@ -153,6 +156,7 @@ def test_approval_gate(broker: Broker):
 
 # ----------------------------------------------------------- broker boundary ---
 
+
 def test_broker_boundary(broker: Broker, demo_env):
     work_role_light = demo_env.work_roles[0]
     task_id = new_task_id("boundary")
@@ -172,7 +176,9 @@ def test_broker_boundary(broker: Broker, demo_env):
             UpdateExpression="SET version = version + :one",
             ExpressionAttributeValues={":one": 1},
         )
-    assert exc_info.value.response["Error"]["Code"] == "AccessDeniedException"  # no write path outside the broker
+    assert (
+        exc_info.value.response["Error"]["Code"] == "AccessDeniedException"
+    )  # no write path outside the broker
 
     # Read access (list/show) is still allowed.
     ai_session.resource("dynamodb").Table(demo_env.table_name).get_item(Key={"task_id": task_id})
@@ -195,4 +201,6 @@ def test_broker_boundary(broker: Broker, demo_env):
             UpdateExpression="SET version = version + :one",
             ExpressionAttributeValues={":one": 1},
         )
-    assert exc_info.value.response["Error"]["Code"] == "AccessDeniedException"  # work role never grants Ledger writes
+    assert (
+        exc_info.value.response["Error"]["Code"] == "AccessDeniedException"
+    )  # work role never grants Ledger writes

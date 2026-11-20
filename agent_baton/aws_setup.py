@@ -17,8 +17,10 @@ called explicitly, and every integration test that calls ``setup_*`` is
 paired with a fixture that calls the matching ``teardown_*`` even on
 failure.
 """
+
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from dataclasses import dataclass
@@ -142,7 +144,13 @@ def setup_demo_environment(env: DemoEnvironment) -> None:
             },
             {
                 "Effect": "Allow",
-                "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Query", "dynamodb:Scan"],
+                "Action": [
+                    "dynamodb:GetItem",
+                    "dynamodb:PutItem",
+                    "dynamodb:UpdateItem",
+                    "dynamodb:Query",
+                    "dynamodb:Scan",
+                ],
                 "Resource": table_arn,
             },
             {
@@ -157,7 +165,9 @@ def setup_demo_environment(env: DemoEnvironment) -> None:
         iamc.create_policy(PolicyName=env.boundary_policy_name, PolicyDocument=json.dumps(boundary_doc))
     iamc.put_role_permissions_boundary(RoleName=env.broker_role, PermissionsBoundary=boundary_arn)
     iamc.put_role_policy(
-        RoleName=env.broker_role, PolicyName=f"{env.prefix}-broker-perms", PolicyDocument=json.dumps(boundary_doc),
+        RoleName=env.broker_role,
+        PolicyName=f"{env.prefix}-broker-perms",
+        PolicyDocument=json.dumps(boundary_doc),
     )
 
     # AI-facing base role: no write action on the Ledger at all.
@@ -169,20 +179,34 @@ def setup_demo_environment(env: DemoEnvironment) -> None:
     ai_perms = {
         "Version": "2012-10-17",
         "Statement": [
-            {"Sid": "ReadOnlyLedger", "Effect": "Allow", "Action": ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan"], "Resource": table_arn},
+            {
+                "Sid": "ReadOnlyLedger",
+                "Effect": "Allow",
+                "Action": ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan"],
+                "Resource": table_arn,
+            },
             {
                 "Sid": "DenyAllLedgerWrites",
                 "Effect": "Deny",
                 "Action": [
-                    "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem",
-                    "dynamodb:BatchWriteItem", "dynamodb:TransactWriteItems",
-                    "dynamodb:PartiQLInsert", "dynamodb:PartiQLUpdate", "dynamodb:PartiQLDelete",
+                    "dynamodb:PutItem",
+                    "dynamodb:UpdateItem",
+                    "dynamodb:DeleteItem",
+                    "dynamodb:BatchWriteItem",
+                    "dynamodb:TransactWriteItems",
+                    "dynamodb:PartiQLInsert",
+                    "dynamodb:PartiQLUpdate",
+                    "dynamodb:PartiQLDelete",
                 ],
                 "Resource": table_arn,
             },
         ],
     }
-    iamc.put_role_policy(RoleName=env.ai_base_role, PolicyName=f"{env.prefix}-ai-base-perms", PolicyDocument=json.dumps(ai_perms))
+    iamc.put_role_policy(
+        RoleName=env.ai_base_role,
+        PolicyName=f"{env.prefix}-ai-base-perms",
+        PolicyDocument=json.dumps(ai_perms),
+    )
 
     # Work-credential roles: trust ONLY the broker.
     work_trust = {
@@ -192,12 +216,18 @@ def setup_demo_environment(env: DemoEnvironment) -> None:
     work_perms = {
         "Version": "2012-10-17",
         "Statement": [
-            {"Effect": "Allow", "Action": "ssm:GetParameter", "Resource": f"arn:aws:ssm:{env.region}:{account}:parameter{env.ssm_allowed}"},
+            {
+                "Effect": "Allow",
+                "Action": "ssm:GetParameter",
+                "Resource": f"arn:aws:ssm:{env.region}:{account}:parameter{env.ssm_allowed}",
+            },
         ],
     }
     for role in env.work_roles:
         _create_or_update_role(iamc, role, work_trust)
-        iamc.put_role_policy(RoleName=role, PolicyName=f"{env.prefix}-work-perms", PolicyDocument=json.dumps(work_perms))
+        iamc.put_role_policy(
+            RoleName=role, PolicyName=f"{env.prefix}-work-perms", PolicyDocument=json.dumps(work_perms)
+        )
 
     time.sleep(15)  # IAM propagation
 
@@ -210,31 +240,21 @@ def teardown_demo_environment(env: DemoEnvironment) -> None:
 
     for role in (env.ai_base_role, *env.work_roles, env.broker_role):
         for pol in (f"{env.prefix}-ai-base-perms", f"{env.prefix}-work-perms", f"{env.prefix}-broker-perms"):
-            try:
+            with contextlib.suppress(ClientError):
                 iamc.delete_role_policy(RoleName=role, PolicyName=pol)
-            except ClientError:
-                pass
-        try:
+        with contextlib.suppress(ClientError):
             iamc.delete_role_permissions_boundary(RoleName=role)
-        except ClientError:
-            pass
-        try:
+        with contextlib.suppress(ClientError):
             iamc.delete_role(RoleName=role)
-        except ClientError:
-            pass
 
     boundary_arn = f"arn:aws:iam::{account}:policy/{env.boundary_policy_name}"
-    try:
+    with contextlib.suppress(ClientError):
         iamc.delete_policy(PolicyArn=boundary_arn)
-    except ClientError:
-        pass
 
     ssm = session.client("ssm")
     for name in (env.ssm_allowed, env.ssm_forbidden):
-        try:
+        with contextlib.suppress(ClientError):
             ssm.delete_parameter(Name=name)
-        except ClientError:
-            pass
 
     ddbc = session.client("dynamodb")
     try:

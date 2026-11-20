@@ -1,4 +1,5 @@
 """Pure unit tests for the policy table - no AWS."""
+
 import json
 
 import pytest

@@ -16,11 +16,12 @@ caller's own (see the global rule this project follows: a mechanism that
 hardcodes which closed-vocabulary values are "useful" stops being a
 mechanism).
 """
+
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Mapping
 
 
 @dataclass(frozen=True)

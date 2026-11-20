@@ -8,6 +8,7 @@ supplies, not in this CLI). It is not the production broker service either
 (CONTRACT.md s.2): there is no network endpoint here, no MFA gate - this
 process *is* the broker, for whoever can run it.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -136,7 +137,9 @@ def cmd_list(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agent-baton")
     p.add_argument("--table", required=True, help="DynamoDB Ledger table name")
-    p.add_argument("--policy-file", required=True, help="path to a JSON policy table (see agent_baton.policy)")
+    p.add_argument(
+        "--policy-file", required=True, help="path to a JSON policy table (see agent_baton.policy)"
+    )
     p.add_argument("--region", default=None)
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -144,7 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("task_id")
     sp.add_argument("kind")
     sp.add_argument("profile")
-    sp.add_argument("resource_binding", help="JSON object, e.g. '{\"capacity_block_id\": \"cr-...\"}'")
+    sp.add_argument("resource_binding", help='JSON object, e.g. \'{"capacity_block_id": "cr-..."}\'')
     sp.set_defaults(fn=cmd_create)
 
     sp = sub.add_parser("claim")

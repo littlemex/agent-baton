@@ -11,6 +11,7 @@ Run only against an AWS account you are allowed to create IAM roles and a
 DynamoDB table in. Per this project's own rule, run on a dedicated test
 runner, never on a contributor's laptop.
 """
+
 from __future__ import annotations
 
 import os
@@ -34,7 +35,10 @@ REGION = os.environ.get("AGENT_BATON_TEST_REGION", "us-east-1")
 
 @pytest.fixture(scope="session")
 def demo_env():
-    prefix = os.environ.get("AGENT_BATON_TEST_PREFIX") or f"agent-baton-ci-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+    prefix = (
+        os.environ.get("AGENT_BATON_TEST_PREFIX")
+        or f"agent-baton-ci-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+    )
     env = plan_demo_environment(prefix, REGION)
     setup_demo_environment(env)
     try:
@@ -79,11 +83,15 @@ def policy_table(demo_env):
     }
 
 
-def assume_session(role_name: str, session_name: str, region: str = REGION, duration: int = 900) -> boto3.Session:
+def assume_session(
+    role_name: str, session_name: str, region: str = REGION, duration: int = 900
+) -> boto3.Session:
     sts = boto3.client("sts", region_name=region)
     account = sts.get_caller_identity()["Account"]
     role_arn = f"arn:aws:iam::{account}:role/{role_name}"
-    creds = sts.assume_role(RoleArn=role_arn, RoleSessionName=session_name, DurationSeconds=duration)["Credentials"]
+    creds = sts.assume_role(RoleArn=role_arn, RoleSessionName=session_name, DurationSeconds=duration)[
+        "Credentials"
+    ]
     return boto3.Session(
         aws_access_key_id=creds["AccessKeyId"],
         aws_secret_access_key=creds["SecretAccessKey"],

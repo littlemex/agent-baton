@@ -5,6 +5,7 @@ implementation made and fixed once (see ``CONTRACT.md`` ss.8). Changing the
 encoding here without re-running the plan-hash-recomputation tests is how
 that mistake comes back.
 """
+
 from __future__ import annotations
 
 import hashlib

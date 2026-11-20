@@ -62,8 +62,12 @@ policy_table = {
 }
 
 broker = Broker(table, policy_table, session=session)
-item = broker.create("cb-2026w47-lane1", "verify-run-light", "verify-run-light-profile",
-                      {"capacity_block_id": "cr-0123456789abcdef0", "lane": 1})
+item = broker.create(
+    "cb-2026w47-lane1",
+    "verify-run-light",
+    "verify-run-light-profile",
+    {"capacity_block_id": "cr-0123456789abcdef0", "lane": 1},
+)
 
 token = "a-caller-generated-csprng-token"  # see agent_baton.new_client_token()
 status, item = broker.claim(item["task_id"], token)  # "claimed", or raises Wait/Rejected

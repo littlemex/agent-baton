@@ -8,10 +8,11 @@ resource; see ``agent_baton.aws_setup`` for the (test/demo-only) scaffolding
 that stands up a table and the per-profile work-credential roles this class
 assumes into.
 """
+
 from __future__ import annotations
 
 import time
-from typing import Any, Optional
+from typing import Any
 
 from botocore.exceptions import ClientError
 
@@ -73,7 +74,7 @@ class Broker:
 
     # ------------------------------------------------------------- reads ---
 
-    def get(self, task_id: str) -> Optional[dict]:
+    def get(self, task_id: str) -> dict | None:
         return self.t.get_item(Key={"task_id": task_id}).get("Item")
 
     def list(self) -> list[dict]:
@@ -97,7 +98,7 @@ class Broker:
             raise Rejected("plan not found")
         return item["plan"]
 
-    def _policy(self, kind: str) -> Optional[KindPolicy]:
+    def _policy(self, kind: str) -> KindPolicy | None:
         return self.policy_table.get(kind)
 
     # ----------------------------------------------------------- create() --
@@ -208,7 +209,11 @@ class Broker:
         # step 8/9 - the current policy's approval requirement, re-checked now
         if policy.requires_approval:
             hg = item.get("human_go")
-            if hg is None or hg.get("plan_hash") != item["plan_ref"] or broker_now() > hg.get("expires_at", 0):
+            if (
+                hg is None
+                or hg.get("plan_hash") != item["plan_ref"]
+                or broker_now() > hg.get("expires_at", 0)
+            ):
                 self.t.update_item(
                     Key={"task_id": task_id},
                     UpdateExpression="SET #s = :aa, version = version + :one",
@@ -277,7 +282,9 @@ class Broker:
         # enough time has passed by this item's own marker; the caller must
         # re-read fresh (done by claim() immediately after this returns)
 
-    def claim_wait_loop(self, task_id: str, client_token: str, poll_interval: float = 0.3, max_wait: float = 30):
+    def claim_wait_loop(
+        self, task_id: str, client_token: str, poll_interval: float = 0.3, max_wait: float = 30
+    ):
         """Convenience for a caller that wants to block: repeatedly calls
         ``claim()`` until it stops raising :class:`Wait`. The elapsed-time
         decision itself still happens inside ``claim()``, against the
@@ -296,7 +303,11 @@ class Broker:
 
     def heartbeat(self, task_id: str, client_token: str) -> bool:
         item = self.get(task_id)
-        if item is None or item.get("lease_holder_hash") != hash_token(client_token) or item["state"] != "claimed":
+        if (
+            item is None
+            or item.get("lease_holder_hash") != hash_token(client_token)
+            or item["state"] != "claimed"
+        ):
             return False
         if broker_now() > item.get("deadline_at", 0):
             return False  # self-fencing signal; claim() handles the state transition
@@ -321,14 +332,23 @@ class Broker:
 
     # -------------------------------------------------------------- park() --
 
-    def park(self, task_id: str, client_token: str, evidence_entry: Optional[dict] = None) -> None:
+    def park(self, task_id: str, client_token: str, evidence_entry: dict | None = None) -> None:
         item = self.get(task_id)
-        if item is None or item.get("lease_holder_hash") != hash_token(client_token) or item["state"] != "claimed":
+        if (
+            item is None
+            or item.get("lease_holder_hash") != hash_token(client_token)
+            or item["state"] != "claimed"
+        ):
             raise Rejected("not the current holder of a claimed task")
         if broker_now() > item.get("deadline_at", 0):
             raise Rejected("deadline exceeded")  # parking never extends past the deadline
         expr = "SET #s = :parked, version = version + :one"
-        vals: dict[str, Any] = {":parked": "parked", ":one": 1, ":h": hash_token(client_token), ":claimed": "claimed"}
+        vals: dict[str, Any] = {
+            ":parked": "parked",
+            ":one": 1,
+            ":h": hash_token(client_token),
+            ":claimed": "claimed",
+        }
         if evidence_entry is not None:
             expr += ", evidence = list_append(if_not_exists(evidence, :empty), :ev)"
             vals[":empty"] = []
@@ -351,12 +371,21 @@ class Broker:
 
     # ----------------------------------------------------------- release() --
 
-    def release(self, task_id: str, client_token: str, evidence_entry: Optional[dict] = None) -> bool:
+    def release(self, task_id: str, client_token: str, evidence_entry: dict | None = None) -> bool:
         item = self.get(task_id)
-        if item is None or item.get("lease_holder_hash") != hash_token(client_token) or item["state"] != "claimed":
+        if (
+            item is None
+            or item.get("lease_holder_hash") != hash_token(client_token)
+            or item["state"] != "claimed"
+        ):
             return False
         expr = "SET #s = :pending, version = version + :one REMOVE lease_holder_hash"
-        vals: dict[str, Any] = {":pending": "pending", ":one": 1, ":h": hash_token(client_token), ":claimed": "claimed"}
+        vals: dict[str, Any] = {
+            ":pending": "pending",
+            ":one": 1,
+            ":h": hash_token(client_token),
+            ":claimed": "claimed",
+        }
         if evidence_entry is not None:
             expr = (
                 "SET #s = :pending, version = version + :one, "
@@ -380,12 +409,21 @@ class Broker:
 
     # --------------------------------------------------- complete() / fail() --
 
-    def _terminal(self, task_id: str, client_token: str, new_state: str, evidence_entry: Optional[dict]) -> bool:
+    def _terminal(self, task_id: str, client_token: str, new_state: str, evidence_entry: dict | None) -> bool:
         item = self.get(task_id)
-        if item is None or item.get("lease_holder_hash") != hash_token(client_token) or item["state"] != "claimed":
+        if (
+            item is None
+            or item.get("lease_holder_hash") != hash_token(client_token)
+            or item["state"] != "claimed"
+        ):
             return False
         expr = "SET #s = :s, version = version + :one REMOVE lease_holder_hash"
-        vals: dict[str, Any] = {":s": new_state, ":one": 1, ":h": hash_token(client_token), ":claimed": "claimed"}
+        vals: dict[str, Any] = {
+            ":s": new_state,
+            ":one": 1,
+            ":h": hash_token(client_token),
+            ":claimed": "claimed",
+        }
         if new_state == "completed":
             vals[":ttl"] = broker_now() + 7 * 86400
             expr = (
@@ -415,10 +453,10 @@ class Broker:
                 return False
             raise
 
-    def complete(self, task_id: str, client_token: str, evidence_entry: Optional[dict] = None) -> bool:
+    def complete(self, task_id: str, client_token: str, evidence_entry: dict | None = None) -> bool:
         return self._terminal(task_id, client_token, "completed", evidence_entry)
 
-    def fail(self, task_id: str, client_token: str, evidence_entry: Optional[dict] = None) -> bool:
+    def fail(self, task_id: str, client_token: str, evidence_entry: dict | None = None) -> bool:
         return self._terminal(task_id, client_token, "failed", evidence_entry)
 
     # -------------------------------------------------------- append_evidence --
@@ -457,7 +495,7 @@ class Broker:
 
     # -------------------------------------------------------- abandon() etc --
 
-    def _abandon_internal(self, task_id: str, reason: str, expected_version: Optional[int]) -> None:
+    def _abandon_internal(self, task_id: str, reason: str, expected_version: int | None) -> None:
         cond = "#s <> :completed AND #s <> :abandoned"
         vals: dict[str, Any] = {
             ":s": "abandoned",
@@ -498,10 +536,18 @@ class Broker:
         try:
             self.t.update_item(
                 Key={"task_id": task_id},
-                UpdateExpression="SET version = version + :one, force_released_reason = :r REMOVE lease_holder_hash",
+                UpdateExpression=(
+                    "SET version = version + :one, force_released_reason = :r "
+                    "REMOVE lease_holder_hash"
+                ),
                 ConditionExpression="#s = :claimed OR #s = :parked",
                 ExpressionAttributeNames={"#s": "state"},
-                ExpressionAttributeValues={":one": 1, ":r": reason, ":claimed": "claimed", ":parked": "parked"},
+                ExpressionAttributeValues={
+                    ":one": 1,
+                    ":r": reason,
+                    ":claimed": "claimed",
+                    ":parked": "parked",
+                },
             )
             return True
         except ClientError as e:
@@ -612,7 +658,11 @@ class Broker:
         client-side chain).
         """
         item = self.get(task_id)
-        if item is None or item.get("lease_holder_hash") != hash_token(client_token) or item["state"] != "claimed":
+        if (
+            item is None
+            or item.get("lease_holder_hash") != hash_token(client_token)
+            or item["state"] != "claimed"
+        ):
             raise Rejected("not the current holder")
         plan = self._plan(item["plan_ref"])
         sts = self._sts()  # the BROKER's own credentials - never a fresh,

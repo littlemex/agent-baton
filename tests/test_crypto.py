@@ -4,6 +4,7 @@ implementation shipped and then fixed a real bug in exactly this area
 from the plan ``create()`` originally hashed, because every number comes
 back as ``decimal.Decimal`` even when it was written as a plain ``int``.
 """
+
 from decimal import Decimal
 
 from agent_baton.crypto import canonical_json, hash_token, new_client_token, plan_ref_for
