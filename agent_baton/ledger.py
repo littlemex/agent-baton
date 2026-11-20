@@ -426,10 +426,14 @@ class Broker:
             ":h": hash_token(client_token),
             ":claimed": "claimed",
         }
+        names = {"#s": "state"}
         if new_state == "completed":
             vals[":ttl"] = broker_now() + 7 * 86400
+            names["#t"] = "ttl"  # "ttl" is a DynamoDB reserved keyword, same class of
+            # bug as CONTRACT.md s.8 item 3 ("plan"); caught by a real Docker-based
+            # smoke test running complete() against real DynamoDB, not by any mock.
             expr = (
-                "SET #s = :s, version = version + :one, ttl = :ttl, "
+                "SET #s = :s, version = version + :one, #t = :ttl, "
                 "evidence = list_append(if_not_exists(evidence, :empty), :ev) REMOVE lease_holder_hash"
             )
             vals[":empty"] = []
@@ -446,7 +450,7 @@ class Broker:
                 Key={"task_id": task_id},
                 UpdateExpression=expr,
                 ConditionExpression="lease_holder_hash = :h AND #s = :claimed",
-                ExpressionAttributeNames={"#s": "state"},
+                ExpressionAttributeNames=names,
                 ExpressionAttributeValues=vals,
             )
             return True
@@ -514,11 +518,11 @@ class Broker:
             self.t.update_item(
                 Key={"task_id": task_id},
                 UpdateExpression=(
-                    "SET #s = :s, version = version + :one, ttl = :ttl, "
+                    "SET #s = :s, version = version + :one, #t = :ttl, "
                     "abandon_reason = :reason REMOVE lease_holder_hash"
                 ),
                 ConditionExpression=cond,
-                ExpressionAttributeNames={"#s": "state"},
+                ExpressionAttributeNames={"#s": "state", "#t": "ttl"},
                 ExpressionAttributeValues=vals,
             )
         except ClientError as e:

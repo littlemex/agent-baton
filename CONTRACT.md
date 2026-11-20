@@ -108,8 +108,10 @@ nothing to do with the plan's own content). `lease_holder_hash` is
 
 ## 8. Known-fixed implementation mistakes (do not reintroduce)
 
-These are the five real bugs the second prototype run caught and fixed,
-carried forward as regression tests, not just prose:
+These are real bugs that have actually been caught and fixed — five in the
+second prototype run this repository's v1 was ported from, and one in this
+repository's own first real-machine Docker smoke test — carried forward as
+regression tests, not just prose:
 
 1. A parameter-name mistake in the write-skip ("already owned") path.
 2. The `Decimal`/`float` serialization mismatch above.
@@ -119,6 +121,17 @@ carried forward as regression tests, not just prose:
    client instead of the broker's own session.
 5. An `AssumeRole` session policy with only a `Deny` statement, intersecting
    to zero permissions (needs an explicit `Allow: *` baseline first).
+6. `ttl` is **also** a DynamoDB reserved keyword, same class of bug as item
+   3. `complete()` and `_abandon_internal()` both set a `ttl` attribute
+   directly in their `UpdateExpression` string; neither the unit tests nor
+   the four RFC scenarios ported from the prototype call `complete()` or
+   `abandon()` against real DynamoDB, so this shipped in the first commit
+   to `main` and was only caught by this repository's own Docker-based
+   smoke test (`docker run agent-baton ... complete ...`) against a real
+   table. Fixed by routing `ttl` through `ExpressionAttributeNames` (`#t`),
+   exactly as `plan` already was; regression-tested by
+   `test_complete_sets_ttl` and `test_abandon_sets_ttl` in
+   `tests/test_ledger_aws.py`.
 
 ## 9. Out of scope for v1 (stated, not silently dropped)
 

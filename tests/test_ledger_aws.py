@@ -204,3 +204,34 @@ def test_broker_boundary(broker: Broker, demo_env):
     assert (
         exc_info.value.response["Error"]["Code"] == "AccessDeniedException"
     )  # work role never grants Ledger writes
+
+
+# -------------------------------------------------- complete()/abandon() + ttl ---
+# CONTRACT.md s.8 item 6: "ttl" is a DynamoDB reserved keyword, same class of bug
+# as "plan" (item 3). Neither the race/lease/approval/boundary scenarios above
+# call complete() or abandon() against real DynamoDB, so this shipped unnoticed
+# until a Docker-based smoke test ran `complete` against a real table. These two
+# tests are the regression coverage that bug is missing without.
+
+
+def test_complete_sets_ttl(broker: Broker):
+    task_id = new_task_id("complete")
+    broker.create(task_id, "demo-light", "demo-light-profile", LIGHT_BINDING)
+    token = new_client_token()
+    broker.claim(task_id, token)
+    ok = broker.complete(task_id, token, evidence_entry={"type": "result", "url": "s3://example/run.log"})
+    assert ok is True
+    item = broker.get(task_id)
+    assert item["state"] == "completed"
+    assert "ttl" in item and item["ttl"] > 0
+    assert item["evidence"][-1]["type"] == "result"
+
+
+def test_abandon_sets_ttl(broker: Broker):
+    task_id = new_task_id("abandon")
+    broker.create(task_id, "demo-light", "demo-light-profile", LIGHT_BINDING)
+    broker.abandon(task_id, "manual test abandon")
+    item = broker.get(task_id)
+    assert item["state"] == "abandoned"
+    assert "ttl" in item and item["ttl"] > 0
+    assert item["abandon_reason"] == "manual test abandon"
