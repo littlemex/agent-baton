@@ -537,8 +537,7 @@ class Broker:
             self.t.update_item(
                 Key={"task_id": task_id},
                 UpdateExpression=(
-                    "SET version = version + :one, force_released_reason = :r "
-                    "REMOVE lease_holder_hash"
+                    "SET version = version + :one, force_released_reason = :r REMOVE lease_holder_hash"
                 ),
                 ConditionExpression="#s = :claimed OR #s = :parked",
                 ExpressionAttributeNames={"#s": "state"},
