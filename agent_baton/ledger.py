@@ -654,13 +654,14 @@ class Broker:
     # -------------------------------------------------------------- sweep() --
 
     def sweep(self) -> list[tuple[str, str]]:
-        """Never calls claim(), never writes lease_holder_hash. The only
-        state change it ever makes is abandon() for an objectively
-        over-budget task - it never takes ownership of anything (an
-        earlier design that had the reaper call ordinary claim() made the
-        reaper the new holder of everything it scanned, charging an
-        attempt every cycle regardless of whether the original holder was
-        ever actually dead).
+        """Never calls claim(), never writes lease_holder_hash, and never
+        takes ownership of anything (an earlier design that had the reaper
+        call ordinary claim() made the reaper the new holder of everything
+        it scanned, charging an attempt every cycle regardless of whether
+        the original holder was ever actually dead). The only state changes
+        it makes are abandon() for an objectively over-budget task, and - to
+        stay in step with claim()'s own order (CONTRACT.md s.8 item 15) -
+        moving a stale claimed task with no valid Go to awaiting_approval.
         """
         notifications: list[tuple[str, str]] = []
         for item in self.list_tasks():
@@ -700,12 +701,15 @@ class Broker:
                     continue
                 if broker_now() - item["wait_started_at"] < policy.lease_seconds:
                     continue
-                if state == "claimed" and not self._has_valid_go(item, policy):
-                    # mirrors claim() step 8: the Go requirement is checked
-                    # before the retry cap, for any claimed-and-stale task
-                    # of an approval-gated kind, not just an over-budget one
-                    # (round-2 review finding F3 - sweep() had drifted from
-                    # claim()'s own order here).
+                if state in LIVE_STATES and not self._has_valid_go(item, policy):
+                    # mirrors claim() step 8 (which resume() reaches too,
+                    # being exactly claim()): the Go requirement applies to
+                    # a stale PARKED task the same as a stale CLAIMED one,
+                    # not just an over-budget one (round-2 review finding
+                    # F3 - sweep() had drifted from claim()'s own order
+                    # here; leaving `parked` out would also have reported a
+                    # misleadingly plain "reclaimable" for a task whose next
+                    # claim()/resume() actually lands in awaiting_approval).
                     try:
                         self.t.update_item(
                             Key={"task_id": tid},
@@ -715,6 +719,14 @@ class Broker:
                             ExpressionAttributeValues={
                                 ":aa": "awaiting_approval",
                                 ":one": 1,
+                                # sweep() always treats a stale claimed task
+                                # as a presumed takeover and charges it - it
+                                # has no caller/token to ask "owned?" the way
+                                # claim() does. If the ORIGINAL holder is the
+                                # one who eventually claims after the fresh
+                                # Go, it is charged here too; this matches
+                                # how sweep() already treats any stale
+                                # claimed task, not a new asymmetry.
                                 ":pc": True,
                                 ":v0": item["version"],
                             },
