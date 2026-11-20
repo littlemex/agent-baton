@@ -110,7 +110,11 @@ def cmd_force_release(args) -> int:
 
 
 def cmd_grant_go(args) -> int:
-    _broker(args).grant_go(args.task_id, args.plan_hash, args.expires_in_seconds, args.granted_by)
+    try:
+        _broker(args).grant_go(args.task_id, args.plan_hash, args.expires_in_seconds, args.granted_by)
+    except Rejected as e:
+        print(f"rejected: {e.reason}", file=sys.stderr)
+        return 1
     print(json.dumps({"ok": True}))
     return 0
 

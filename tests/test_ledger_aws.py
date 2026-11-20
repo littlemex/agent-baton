@@ -297,3 +297,46 @@ def test_heartbeat_injected_at_the_staleness_gap_blocks_the_takeover(broker: Bro
     assert item["state"] == "claimed"
     assert item["lease_holder_hash"] == hash_token(tok_a)  # A, never B
     assert broker.heartbeat(task_id, tok_a) is True  # A's lease is alive and well
+
+
+# --------------------------------- the retry cap survives an approval detour ---
+# Round-2 review finding F2: a stale takeover of an approval-gated kind that
+# gets redirected to awaiting_approval (step 8) must still be charged once a
+# fresh Go lets a later claim() through - otherwise the retry cap is
+# bypassable by repeatedly re-granting a Go. Exercises pending_charge end to
+# end against real DynamoDB.
+
+
+def test_retry_cap_survives_an_approval_detour(broker: Broker, policy_table):
+    task_id = new_task_id("budget")
+    item = broker.create(task_id, "demo-approval", "demo-approval-profile", LIGHT_BINDING)
+    lease_seconds = policy_table["demo-approval"].lease_seconds
+    plan_ref = item["plan_ref"]
+
+    # A short-lived first Go: valid long enough for A to claim, but expired
+    # by the time a stale takeover is confirmed.
+    broker.grant_go(task_id, plan_ref, expires_in_seconds=2, granted_by="littlemex")
+    tok_a = new_client_token()
+    status, item = broker.claim(task_id, tok_a)
+    assert status == "claimed"
+    assert item["attempt_count"] == 0  # the first claim of a freshly-approved task is not a retry
+
+    tok_b = new_client_token()
+    with pytest.raises(Wait):
+        broker.claim(task_id, tok_b)  # arms the staleness marker
+
+    time.sleep(lease_seconds + 0.5)  # both the lease AND the short Go are now stale/expired
+
+    with pytest.raises(Rejected, match="awaiting human Go"):
+        broker.claim(task_id, tok_b)
+    item = broker.get(task_id)
+    assert item["state"] == "awaiting_approval"
+    assert item["pending_charge"] is True  # the charge decision survives the redirect
+    assert item["attempt_count"] == 0  # not charged YET - only once a fresh Go lets a claim land
+
+    broker.grant_go(task_id, plan_ref, expires_in_seconds=60, granted_by="littlemex")
+    tok_c = new_client_token()
+    status, item = broker.claim(task_id, tok_c)
+    assert status == "claimed"
+    assert item["attempt_count"] == 1  # the stale takeover WAS charged, carried across the detour
+    assert "pending_charge" not in item  # cleared on the claim that consumed it

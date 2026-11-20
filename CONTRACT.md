@@ -46,7 +46,7 @@ All of these mutate the Ledger. **Nothing else may write it** — see §5.
 | `force_release(task_id, reason)` | maintainer only | Clears `lease_holder_hash`; does not change state, does not skip the wait |
 | `grant_go(task_id, plan_hash, expires_in_seconds, granted_by)` | maintainer only | Conditional on `plan_hash` matching the task's *current* `plan_ref` |
 | `append_evidence(task_id, client_token, entry)` | current holder (`claimed` or `parked`) | Appends to the `evidence` list. **Not size- or count-bounded by any code in v1** — see s.9; a holder that appends without limit can grow the item toward DynamoDB's 400 KB item limit |
-| `sweep()` | scheduled / session-start | Never calls `claim()` and never writes `lease_holder_hash`; the only *state* change it ever makes is calling `abandon()` internally for an objectively over-budget task. It does, however, write the same `wait_started_at`/`wait_started_version` staleness marker `claim()`'s two-call wait uses (s.6) — sharing that one mechanism, not a second one, is why its own deadline/retry-cap logic can never drift from `claim()`'s |
+| `sweep()` | scheduled / session-start | Never calls `claim()` and never writes `lease_holder_hash`; the only *state* changes it ever makes are moving a stale `claimed` task with no valid Go to `awaiting_approval` (mirroring `claim()` step 8, before any retry-cap decision) and calling `abandon()` internally for an objectively over-budget `claimed` task that *does* have a valid Go (or needs none). It also writes the same `wait_started_at`/`wait_started_version` staleness marker `claim()`'s two-call wait uses (s.6) — sharing that one mechanism, not a second one, is why its own deadline/retry-cap/Go logic can never drift from `claim()`'s |
 | `vend_work_credentials(task_id, client_token, duration=900)` | current holder | `sts:AssumeRole` on the plan's `work_role`, with an `Allow: *` baseline session policy plus the profile's narrowing `Deny` statements |
 | `get(task_id)` / `list_tasks()` | anyone | Read-only |
 
@@ -59,9 +59,9 @@ All of these mutate the Ledger. **Nothing else may write it** — see §5.
 5. Determine `owned` = state is `claimed` and `lease_holder_hash == sha256(client_token)`.
 6. If live (`claimed` or `parked`) and not owned: run the two-call wait (§6); only proceed past this step once the task is confirmed not live, or live-and-stale.
 7. Decide whether this attempt charges `attempt_count` (a stale takeover, or a `failed → claimed` retry — **never** a graceful release-then-claim or a park-then-resume).
-8. Check whether the **current** policy requires a Go (not only at creation time); if required and no valid, matching, unexpired grant exists, move to `awaiting_approval` and reject. (This runs before step 9, not after — an over-budget task with a missing or expired Go goes to `awaiting_approval`, not straight to abandoned; once a Go is granted, the retry-cap check below still applies on the next claim.)
-9. If charging and `attempt_count >= max_retries`, abandon and reject.
-10. Write the claim, conditioned on `version` unchanged since the value confirmed in step 5/6 — the actual compare-and-swap, never a version from a fresh re-read taken after that confirmation. Every write in steps 8–10 that mutates the task item carries this same condition, independently, and on a `ConditionalCheckFailedException` re-runs `claim()` from step 1 rather than surfacing a raw AWS error.
+8. Check whether the **current** policy requires a Go (not only at creation time); if required and no valid, matching, unexpired grant exists, write `pending_charge = <step 7's charge decision>` and move to `awaiting_approval`, then reject. (This runs before step 9, not after — an over-budget task with a missing or expired Go goes to `awaiting_approval`, not straight to abandoned. `pending_charge` is what makes the retry-cap check below still apply once a fresh Go is granted: that later `claim()` sees `state="pending"`, not `"claimed"`/`"failed"`, so step 7 also treats `pending_charge is True` as charging — without this, an approval-gated kind's retry cap is bypassable by repeatedly re-granting a Go.)
+9. If charging and `attempt_count >= max_retries`, abandon and reject; if the abandon itself loses its own version-conditioned race (the task changed under it), re-run `claim()` from step 1 instead of reporting a terminal rejection for a task that turned out still live.
+10. Write the claim, conditioned on `version` unchanged since the value confirmed in step 5/6 — the actual compare-and-swap, never a version from a fresh re-read taken after that confirmation. This write also clears `pending_charge`. Every write in steps 8–10 that mutates the task item carries this same version condition, independently, and on a `ConditionalCheckFailedException` re-runs `claim()` from step 1 rather than surfacing a raw AWS error.
 
 ## 5. Permission boundary (Decision 5)
 
@@ -169,6 +169,29 @@ regression tests, not just prose:
     `contextlib.suppress(ClientError)` - a leaked policy would pass s.10's
     "every created resource confirmed deleted" bar silently. Fixed by
     checking it explicitly.
+13. (Round 2) `claim()`'s own retry-cap abandon (step 9) ignored whether the
+    abandon actually committed - if it lost its version-conditioned race
+    (the holder renewed in the gap), the caller still got a terminal
+    `Rejected("retries exhausted")` for a task that was not actually
+    abandoned and is still live. Fixed by having `_abandon_internal` report
+    whether it committed, and re-running `claim()` from a fresh read when
+    it did not - the same pattern step 8 and step 10 already used.
+14. (Round 2) The retry-cap budget was bypassable for an approval-gated
+    `kind`: step 8's redirect to `awaiting_approval` discarded step 7's
+    charge decision, so the next `claim()` (after a fresh Go) saw
+    `state="pending"`, computed `charge=False`, and never incremented
+    `attempt_count` - an unlimited number of retries, one fresh Go each.
+    Fixed by persisting the decision as `pending_charge` across the detour
+    (step 8's text above has the detail) and clearing it on a successful
+    claim.
+15. (Round 2) `sweep()`'s stale-`claimed` branch abandoned on an exhausted
+    retry budget without first checking the Go requirement step 8 checks -
+    an approval-gated kind with a missing or expired Go could be abandoned
+    by `sweep()` in a case `claim()` itself would instead route to
+    `awaiting_approval`, exactly the drift s.3's `sweep()` row says must
+    never happen. Fixed by extracting the Go check into
+    `Broker._has_valid_go()`, shared by `claim()` and `sweep()`, and
+    checking it first.
 
 ## 9. Out of scope for v1 (stated, not silently dropped)
 

@@ -108,6 +108,19 @@ class Broker:
     def _policy(self, kind: str) -> KindPolicy | None:
         return self.policy_table.get(kind)
 
+    @staticmethod
+    def _has_valid_go(item: dict, policy: KindPolicy) -> bool:
+        """Shared by claim() (step 8) and sweep() - round-2 review finding
+        F3: the two had drifted (sweep() abandoned a stale, over-budget
+        task without this check at all), which CONTRACT.md s.3 says must
+        never happen."""
+        if not policy.requires_approval:
+            return True
+        hg = item.get("human_go")
+        if hg is None or hg.get("plan_hash") != item["plan_ref"]:
+            return False
+        return broker_now() <= hg.get("expires_at", 0)
+
     # ----------------------------------------------------------- create() --
 
     def create(self, task_id: str, kind: str, requested_profile: str, resource_binding: dict) -> dict:
@@ -233,42 +246,49 @@ class Broker:
         if not owned and item["state"] in LIVE_STATES:
             self._arm_or_wait(task_id, item, policy)
 
-        # step 7 - does this attempt charge the retry budget?
-        charge = (not owned) and item["state"] in ("claimed", "failed")
+        # step 7 - does this attempt charge the retry budget? `pending_charge`
+        # carries a "yes" across an approval detour (step 8, below): a stale
+        # takeover or failed-retry that gets redirected to awaiting_approval
+        # must still be charged once a fresh Go lets it reach this point
+        # again as a "pending" task - otherwise the retry cap is bypassable
+        # by repeatedly re-granting a Go (round-2 review finding F2).
+        charge = (not owned) and (
+            item["state"] in ("claimed", "failed") or item.get("pending_charge") is True
+        )
 
         # step 8/9 - the current policy's approval requirement, re-checked now
-        if policy.requires_approval:
-            hg = item.get("human_go")
-            if (
-                hg is None
-                or hg.get("plan_hash") != item["plan_ref"]
-                or broker_now() > hg.get("expires_at", 0)
-            ):
-                try:
-                    self.t.update_item(
-                        Key={"task_id": task_id},
-                        UpdateExpression="SET #s = :aa, version = version + :one",
-                        ConditionExpression="version = :v0",
-                        ExpressionAttributeNames={"#s": "state"},
-                        ExpressionAttributeValues={
-                            ":aa": "awaiting_approval",
-                            ":one": 1,
-                            ":v0": item["version"],
-                        },
-                    )
-                except ClientError as e:
-                    if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
-                        raise
-                    # the holder renewed (or someone else wrote) in the gap
-                    # between the confirmed-stale read and this write - the
-                    # task is no longer in the state this decision was made
-                    # against; re-run claim() from a fresh read instead of
-                    # surfacing a raw ClientError to the caller.
-                    return self.claim(task_id, client_token)
-                raise Rejected("awaiting human Go")
+        if not self._has_valid_go(item, policy):
+            try:
+                self.t.update_item(
+                    Key={"task_id": task_id},
+                    UpdateExpression="SET #s = :aa, version = version + :one, pending_charge = :pc",
+                    ConditionExpression="version = :v0",
+                    ExpressionAttributeNames={"#s": "state"},
+                    ExpressionAttributeValues={
+                        ":aa": "awaiting_approval",
+                        ":one": 1,
+                        ":pc": charge,
+                        ":v0": item["version"],
+                    },
+                )
+            except ClientError as e:
+                if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                    raise
+                # the holder renewed (or someone else wrote) in the gap
+                # between the confirmed-stale read and this write - the
+                # task is no longer in the state this decision was made
+                # against; re-run claim() from a fresh read instead of
+                # surfacing a raw ClientError to the caller.
+                return self.claim(task_id, client_token)
+            raise Rejected("awaiting human Go")
 
         if charge and item["attempt_count"] >= policy.max_retries:
-            self._abandon_internal(task_id, "retries exhausted", expected_version=item["version"])
+            if not self._abandon_internal(task_id, "retries exhausted", expected_version=item["version"]):
+                # the task changed under us (e.g. the holder renewed) - the
+                # abandon did not land, so this is no longer a confirmed
+                # over-budget task; re-run claim() fresh rather than report
+                # a terminal rejection for a task that is still live.
+                return self.claim(task_id, client_token)
             raise Rejected("retries exhausted")
 
         if owned:
@@ -282,7 +302,8 @@ class Broker:
                 UpdateExpression=(
                     "SET lease_holder_hash = :h, #s = :claimed, "
                     "claimed_at = if_not_exists(claimed_at, :now), "
-                    "attempt_count = attempt_count + :charge, version = version + :one"
+                    "attempt_count = attempt_count + :charge, version = version + :one "
+                    "REMOVE pending_charge"
                 ),
                 ConditionExpression="version = :v0",
                 ExpressionAttributeNames={"#s": "state"},
@@ -334,8 +355,11 @@ class Broker:
         elapsed = broker_now() - item["wait_started_at"]
         if elapsed < policy.lease_seconds:
             raise Wait(policy.lease_seconds - elapsed)
-        # enough time has passed by this item's own marker; the caller must
-        # re-read fresh (done by claim() immediately after this returns)
+        # enough time has passed, by this item's own marker, with version
+        # unchanged throughout - `item` IS the confirmed-stale snapshot.
+        # claim() must use THIS version for its own CAS, never a fresh
+        # re-read taken after this point returns (that was a real bug,
+        # fixed - see CONTRACT.md s.8 item 7 - do not reintroduce it here).
 
     def claim_wait_loop(
         self, task_id: str, client_token: str, poll_interval: float = 0.3, max_wait: float = 30
@@ -559,7 +583,14 @@ class Broker:
 
     # -------------------------------------------------------- abandon() etc --
 
-    def _abandon_internal(self, task_id: str, reason: str, expected_version: int | None) -> None:
+    def _abandon_internal(self, task_id: str, reason: str, expected_version: int | None) -> bool:
+        """Returns whether this call actually committed the abandon. A
+        version-guarded call that loses the race (the task changed under
+        it - e.g. the holder renewed) is a no-op, not an error - but
+        `claim()`'s own retry-cap check (step 9) must know the difference,
+        rather than assuming the abandon always lands (CONTRACT.md s.8
+        item 13 / round-2 review finding F1).
+        """
         cond = "#s <> :completed AND #s <> :abandoned"
         vals: dict[str, Any] = {
             ":s": "abandoned",
@@ -583,9 +614,11 @@ class Broker:
                 ExpressionAttributeNames={"#s": "state", "#t": "ttl"},
                 ExpressionAttributeValues=vals,
             )
+            return True
         except ClientError as e:
             if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
-                raise  # a version-guarded abandon that lost the race is a no-op, not an error
+                raise
+            return False  # lost the race - a no-op, not an error, but not a commit either
 
     def abandon(self, task_id: str, reason: str) -> None:
         """Maintainer-only, external shape (CONTRACT.md s.3)."""
@@ -667,7 +700,31 @@ class Broker:
                     continue
                 if broker_now() - item["wait_started_at"] < policy.lease_seconds:
                     continue
-                if state == "claimed" and item["attempt_count"] >= policy.max_retries:
+                if state == "claimed" and not self._has_valid_go(item, policy):
+                    # mirrors claim() step 8: the Go requirement is checked
+                    # before the retry cap, for any claimed-and-stale task
+                    # of an approval-gated kind, not just an over-budget one
+                    # (round-2 review finding F3 - sweep() had drifted from
+                    # claim()'s own order here).
+                    try:
+                        self.t.update_item(
+                            Key={"task_id": tid},
+                            UpdateExpression="SET #s = :aa, version = version + :one, pending_charge = :pc",
+                            ConditionExpression="version = :v0",
+                            ExpressionAttributeNames={"#s": "state"},
+                            ExpressionAttributeValues={
+                                ":aa": "awaiting_approval",
+                                ":one": 1,
+                                ":pc": True,
+                                ":v0": item["version"],
+                            },
+                        )
+                    except ClientError as e:
+                        if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                            raise
+                        # lost the race (the holder renewed) - nothing to
+                        # do; the next sweep cycle re-evaluates from fresh
+                elif state == "claimed" and item["attempt_count"] >= policy.max_retries:
                     self._abandon_internal(tid, "retries exhausted", expected_version=item["version"])
                 else:
                     notifications.append((tid, "reclaimable"))
