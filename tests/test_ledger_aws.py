@@ -285,13 +285,12 @@ def test_heartbeat_injected_at_the_staleness_gap_blocks_the_takeover(broker: Bro
             assert broker.heartbeat(task_id, tok_a) is True
         return real_update_item(**kwargs)
 
-    with mock.patch.object(broker.t, "update_item", side_effect=wrapped_update_item):
-        with pytest.raises(Wait):
-            # B's write loses the CAS against A's just-landed heartbeat,
-            # ledger.py catches that ConditionalCheckFailedException and
-            # re-runs claim() from a fresh read - which now sees A's renewed
-            # lease and must wait out a fresh lease_seconds, not succeed.
-            broker.claim(task_id, tok_b)
+    with mock.patch.object(broker.t, "update_item", side_effect=wrapped_update_item), pytest.raises(Wait):
+        # B's write loses the CAS against A's just-landed heartbeat,
+        # ledger.py catches that ConditionalCheckFailedException and
+        # re-runs claim() from a fresh read - which now sees A's renewed
+        # lease and must wait out a fresh lease_seconds, not succeed.
+        broker.claim(task_id, tok_b)
 
     assert injected["done"] is True  # the injection actually happened - not a vacuous pass
     item = broker.get(task_id)
