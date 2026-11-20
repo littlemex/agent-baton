@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-unit-tests:
+    # These are the non-AWS checks only: ruff, mypy, and the tests NOT marked
+    # `aws` (see pyproject.toml). The `aws`-marked tests create real DynamoDB/IAM
+    # resources and are run by hand on a dedicated test runner with scoped AWS
+    # credentials - never in this workflow, which has none.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v5.0.0
+      - uses: actions/setup-python@65d7f2d534ac1bc67fcd62888c5f4f3d2cb2b236 # v6.0.0
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy agent_baton
+      - run: pytest -m "not aws" -v

@@ -1,0 +1,68 @@
+name: "Bug Report"
+description: Report a bug to help us improve.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        #### Before submitting a bug report, please make sure you have searched [existing issues](https://github.com/littlemex/agent-baton/issues).
+
+
+        **IMPORTANT:** Please redact any AWS account IDs, access keys, secret keys, session
+        tokens, role ARNs, or other sensitive information from your bug report and log output.
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Prerequisites
+      options:
+        - label: I have searched existing issues to make sure this bug has not already been reported.
+          required: true
+        - label: I have verified the issue against the latest `main` branch.
+          required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: >
+        Provide details about your environment. Fill in the relevant fields below.
+      value: |
+        - agent-baton version / commit: [e.g., 0.1.0 / abc1234]
+        - Python version: [e.g., 3.11.8]
+        - boto3 version: [e.g., 1.34.x]
+        - Where this runs: [e.g., CLI on a laptop / Lambda / a container on EKS / EC2]
+        - AWS region (if relevant to the bug): [e.g., us-east-1]
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: Describe the bug. Include what you expected to happen and what actually happened.
+      placeholder: |
+        **Expected behavior:**
+
+        **Actual behavior:**
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Provide the steps to reproduce the bug.
+      placeholder: |
+        1. Call Broker.claim(...) with ...
+        2. With policy table ...
+        3. See error ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Log Output
+      description: >
+        Paste any relevant log output here. This will be automatically formatted as code.
+        **Remember to redact sensitive information.**
+      render: shell
+    validations:
+      required: false

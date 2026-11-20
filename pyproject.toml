@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-baton"
+version = "0.1.0"
+description = "A crash-safe task ledger for handing an in-flight task, and the capacity reservation it is bound to, from one AI agent session to a different one."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "littlemex" }]
+dependencies = ["boto3>=1.34"]
+
+[project.urls]
+Homepage = "https://github.com/littlemex/agent-baton"
+Issues = "https://github.com/littlemex/agent-baton/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "boto3-stubs[dynamodb,iam,sts,ssm]>=1.34"]
+
+[project.scripts]
+agent-baton = "agent_baton.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agent_baton*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "aws: exercises real AWS (DynamoDB/IAM/STS) - creates and tears down its own resources; never run on a developer laptop, see README Testing",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
