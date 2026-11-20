@@ -60,7 +60,7 @@ def plan_demo_environment(prefix: str, region: str) -> DemoEnvironment:
 
 
 def _create_or_update_role(iamc, name: str, trust_doc: dict) -> None:
-    last_err = None
+    last_err: ClientError | None = None
     for _ in range(10):
         try:
             iamc.create_role(RoleName=name, AssumeRolePolicyDocument=json.dumps(trust_doc))
@@ -75,7 +75,9 @@ def _create_or_update_role(iamc, name: str, trust_doc: dict) -> None:
                 time.sleep(5)
                 continue
             raise
-    raise last_err
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError(f"failed to create or update role {name} after 10 attempts")
 
 
 def _policy_exists(iamc, policy_arn: str) -> bool:

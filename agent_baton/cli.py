@@ -130,7 +130,7 @@ def cmd_show(args) -> int:
 
 
 def cmd_list(args) -> int:
-    _print(_broker(args).list())
+    _print(_broker(args).list_tasks())
     return 0
 
 

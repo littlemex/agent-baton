@@ -77,7 +77,7 @@ class Broker:
     def get(self, task_id: str) -> dict | None:
         return self.t.get_item(Key={"task_id": task_id}).get("Item")
 
-    def list(self) -> list[dict]:
+    def list_tasks(self) -> list[dict]:
         """CONTRACT.md s.3: read actions are reachable identically from
         anywhere with the same identity any session already has. A real
         deployment paginates and/or uses a GSI; v1's ``scan()`` is sized
@@ -155,7 +155,7 @@ class Broker:
             item["deadline_at"] = broker_now() + policy.timebox_minutes * 60
         try:
             self.t.put_item(Item=item, ConditionExpression="attribute_not_exists(task_id)")
-            return self.get(task_id)
+            return item  # the item we just wrote, not a second read
         except ClientError as e:
             if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
                 raise
@@ -201,6 +201,8 @@ class Broker:
         if not owned and item["state"] in LIVE_STATES:
             self._arm_or_wait(task_id, item, policy)
             item = self.get(task_id)  # version may have moved; recompute fresh
+            if item is None:
+                raise Rejected("no such task")  # deleted/expired between the two reads
             owned = item["state"] == "claimed" and item.get("lease_holder_hash") == token_hash
 
         # step 7 - does this attempt charge the retry budget?
@@ -566,7 +568,7 @@ class Broker:
         ever actually dead).
         """
         notifications: list[tuple[str, str]] = []
-        for item in self.list():
+        for item in self.list_tasks():
             tid = item["task_id"]
             state = item["state"]
             if state in TERMINAL_STATES:

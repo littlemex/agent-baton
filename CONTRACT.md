@@ -48,7 +48,7 @@ All of these mutate the Ledger. **Nothing else may write it** — see §5.
 | `append_evidence(task_id, client_token, entry)` | current holder (`claimed` or `parked`) | Appends to the bounded `evidence` list |
 | `sweep()` | scheduled / session-start | Never claims; only ever calls `abandon()` internally for an objectively over-budget task; otherwise only notifies |
 | `vend_work_credentials(task_id, client_token, duration=900)` | current holder | `sts:AssumeRole` on the plan's `work_role`, with an `Allow: *` baseline session policy plus the profile's narrowing `Deny` statements |
-| `get(task_id)` / `list()` | anyone | Read-only |
+| `get(task_id)` / `list_tasks()` | anyone | Read-only |
 
 ## 4. `claim()`'s decision order (normative — an implementation that reorders this is wrong)
 
