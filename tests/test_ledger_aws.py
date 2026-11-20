@@ -309,7 +309,14 @@ def test_heartbeat_injected_at_the_staleness_gap_blocks_the_takeover(broker: Bro
 
 def test_retry_cap_survives_an_approval_detour(broker: Broker, policy_table):
     task_id = new_task_id("budget")
-    item = broker.create(task_id, "demo-approval", "demo-approval-profile", LIGHT_BINDING)
+    # A distinct resource_binding (not LIGHT_BINDING): test_approval_gate
+    # above deliberately tampers with LIGHT_BINDING's own stored plan
+    # out-of-band to prove N4's recomputation, which would otherwise make
+    # this test's create() see a plan_ref collision with that now-corrupted
+    # plan item (same reason test_approval_gate's own "expired" case uses
+    # lane=2 instead of reusing LIGHT_BINDING).
+    budget_binding = {"capacity_block_id": "demo-cb-0001", "lane": 7}
+    item = broker.create(task_id, "demo-approval", "demo-approval-profile", budget_binding)
     lease_seconds = policy_table["demo-approval"].lease_seconds
     plan_ref = item["plan_ref"]
 
