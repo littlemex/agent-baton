@@ -138,9 +138,9 @@ regression tests, not just prose:
    Acceptance Criteria name as unverified by the prototype and a target for
    "the first implementation PR to verify by execution": a heartbeat landing
    between the staleness check and the claiming write no longer blocked the
-   takeover. Caught by adversarial review (Fable 5.2), not by any test that
-   had been written - this repository's own first implementation shipped
-   with exactly the gap it was supposed to close. Fixed by removing the
+   takeover. Caught by review, not by any test that had been written - this
+   repository's own first implementation shipped with exactly the gap it
+   was supposed to close. Fixed by removing the
    re-read; `item`'s version is unchanged by definition if `_arm_or_wait`
    returned without raising.
 8. `Broker.__init__`'s `session` parameter defaulted to `None` and
@@ -169,14 +169,14 @@ regression tests, not just prose:
     `contextlib.suppress(ClientError)` - a leaked policy would pass s.10's
     "every created resource confirmed deleted" bar silently. Fixed by
     checking it explicitly.
-13. (Round 2) `claim()`'s own retry-cap abandon (step 9) ignored whether the
+13. `claim()`'s own retry-cap abandon (step 9) ignored whether the
     abandon actually committed - if it lost its version-conditioned race
     (the holder renewed in the gap), the caller still got a terminal
     `Rejected("retries exhausted")` for a task that was not actually
     abandoned and is still live. Fixed by having `_abandon_internal` report
     whether it committed, and re-running `claim()` from a fresh read when
     it did not - the same pattern step 8 and step 10 already used.
-14. (Round 2) The retry-cap budget was bypassable for an approval-gated
+14. The retry-cap budget was bypassable for an approval-gated
     `kind`: step 8's redirect to `awaiting_approval` discarded step 7's
     charge decision, so the next `claim()` (after a fresh Go) saw
     `state="pending"`, computed `charge=False`, and never incremented
@@ -184,7 +184,7 @@ regression tests, not just prose:
     Fixed by persisting the decision as `pending_charge` across the detour
     (step 8's text above has the detail) and clearing it on a successful
     claim.
-15. (Round 2) `sweep()`'s stale-`claimed` branch abandoned on an exhausted
+15. `sweep()`'s stale-`claimed` branch abandoned on an exhausted
     retry budget without first checking the Go requirement step 8 checks -
     an approval-gated kind with a missing or expired Go could be abandoned
     by `sweep()` in a case `claim()` itself would instead route to

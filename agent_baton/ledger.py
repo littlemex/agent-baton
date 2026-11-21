@@ -110,9 +110,9 @@ class Broker:
 
     @staticmethod
     def _has_valid_go(item: dict, policy: KindPolicy) -> bool:
-        """Shared by claim() (step 8) and sweep() - round-2 review finding
-        F3: the two had drifted (sweep() abandoned a stale, over-budget
-        task without this check at all), which CONTRACT.md s.3 says must
+        """Shared by claim() (step 8) and sweep() - without this, the two
+        can drift apart (sweep() abandoning a stale, over-budget task
+        without ever checking this at all), which CONTRACT.md s.3 says must
         never happen."""
         if not policy.requires_approval:
             return True
@@ -251,7 +251,7 @@ class Broker:
         # takeover or failed-retry that gets redirected to awaiting_approval
         # must still be charged once a fresh Go lets it reach this point
         # again as a "pending" task - otherwise the retry cap is bypassable
-        # by repeatedly re-granting a Go (round-2 review finding F2).
+        # by repeatedly re-granting a Go.
         charge = (not owned) and (
             item["state"] in ("claimed", "failed") or item.get("pending_charge") is True
         )
@@ -589,7 +589,7 @@ class Broker:
         it - e.g. the holder renewed) is a no-op, not an error - but
         `claim()`'s own retry-cap check (step 9) must know the difference,
         rather than assuming the abandon always lands (CONTRACT.md s.8
-        item 13 / round-2 review finding F1).
+        item 13).
         """
         cond = "#s <> :completed AND #s <> :abandoned"
         vals: dict[str, Any] = {
@@ -705,11 +705,10 @@ class Broker:
                     # mirrors claim() step 8 (which resume() reaches too,
                     # being exactly claim()): the Go requirement applies to
                     # a stale PARKED task the same as a stale CLAIMED one,
-                    # not just an over-budget one (round-2 review finding
-                    # F3 - sweep() had drifted from claim()'s own order
-                    # here; leaving `parked` out would also have reported a
-                    # misleadingly plain "reclaimable" for a task whose next
-                    # claim()/resume() actually lands in awaiting_approval).
+                    # not just an over-budget one. Leaving `parked` out
+                    # would also report a misleadingly plain "reclaimable"
+                    # for a task whose next claim()/resume() actually lands
+                    # in awaiting_approval.
                     try:
                         self.t.update_item(
                             Key={"task_id": tid},

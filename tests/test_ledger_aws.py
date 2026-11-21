@@ -300,11 +300,11 @@ def test_heartbeat_injected_at_the_staleness_gap_blocks_the_takeover(broker: Bro
 
 
 # --------------------------------- the retry cap survives an approval detour ---
-# Round-2 review finding F2: a stale takeover of an approval-gated kind that
-# gets redirected to awaiting_approval (step 8) must still be charged once a
-# fresh Go lets a later claim() through - otherwise the retry cap is
-# bypassable by repeatedly re-granting a Go. Exercises pending_charge end to
-# end against real DynamoDB.
+# A stale takeover of an approval-gated kind that gets redirected to
+# awaiting_approval (step 8) must still be charged once a fresh Go lets a
+# later claim() through - otherwise the retry cap is bypassable by
+# repeatedly re-granting a Go. Exercises pending_charge end to end against
+# real DynamoDB.
 
 
 def test_retry_cap_survives_an_approval_detour(broker: Broker, policy_table):
